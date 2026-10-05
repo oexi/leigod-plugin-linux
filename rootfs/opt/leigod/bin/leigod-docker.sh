@@ -202,7 +202,7 @@ EOT
 version="$(plugin_version "$(plugin_bin)")"
 EOT
 
-    # 插件从 uci network.lan 取本机网段
+    # 插件从 uci network.lan 取本机网段；app 的流量统计读 network.wan 的网卡（旁路网关只有一个口，都指向网桥）
     addr=$(lan_addr)
     [ -f "$PLUGIN_CONF_DIR/network" ] || touch "$PLUGIN_CONF_DIR/network"
     uci -q batch <<EOT
@@ -216,6 +216,9 @@ set network.lan.device='$LAN_IF'
 set network.lan.proto='static'
 set network.lan.ipaddr='${addr%/*}'
 set network.lan.netmask='$(prefix_to_mask "${addr#*/}")'
+set network.wan=interface
+set network.wan.device='$LAN_IF'
+set network.wan.proto='static'
 commit network
 EOT
 }

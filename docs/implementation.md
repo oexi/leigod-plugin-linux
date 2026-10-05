@@ -42,11 +42,18 @@ The entrypoint reproduces these files and runs the same two commands under its o
   (dummy, or a veth pair if the kernel has no dummy module) with the same MAC is created rather than renaming the RouterOS-managed interface
 - **Process names**: `acc-gw.router.<arch>` and `acc_upgrade_monitor` exceed the 15-character `comm`, so `pidof` cannot find them;
   scripts match `/proc/*/cmdline` (only processes whose argv[0] is the plugin)
-- `uci` is still used for a few lookups (`network.lan`), so the image keeps OpenWrt's `uci` and writes `network.lan` from the bridge address
+- `uci` is still used for a few lookups, so the image keeps OpenWrt's `uci`: `network.lan.ipaddr/netmask` (LAN subnet),
+  `accelerator.base.token`, and for the app's traffic statistics `network.wan.ifname` → `network.wan.device` → `network.wan.neigh`
+  → `accelerator.base.neigh` (the interface whose `/proc/net/dev` counters are reported). Without a WAN entry every `statistics`
+  request from the app failed with "get wan traffic failed"; the entrypoint points both `network.lan` and `network.wan` at `br-lan`.
+  `ubus` calls (Wi-Fi status, LED) fail harmlessly
 
 ## Runtime behaviour
 
 - `daemon` supervises `web` (`-r web`, TCP 5588 app API, TCP 10001, UDP 6066 discovery) and per-category accelerator processes;
+  the app API is a WebSocket on port 5588 carrying JSON `{"cmd": "...", "sn": "<eth0 MAC>", "data": {"token": ...}}`
+  (e.g. `getRouterInfo`, `statistics`, `startAcc`), logged in `web_api.log` as `[api] request: ... response: ...`.
+  In `tun` mode, starting acceleration creates `tun_<category>` interfaces and `fwmark 0x102`/`0x103` policy-routing rules;
   `acc_upgrade_monitor -r upgrade` checks for updates ("don't need to upgrade, local version: 1.2.2.52")
 - Logs: `/tmp/acc/log/acc_daemon.log`, `web_api.log`, `acc_upgrade.log`; state: `/tmp/acc/acc_core_conf.json`
 - Downloads a MAC vendor list for consoles (`mac.json`), a global config from `opapi.xxghh.biz`, and connects to

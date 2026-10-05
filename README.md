@@ -101,9 +101,9 @@ or `network_mode: host` (the entrypoint also rebuilds the container's network in
 Verified locally (2026-10-05, plugin `1.2.2.52`, arm64): the plugin detects an OpenWrt router, finds the LAN bridge and devices,
 its web API and upgrader run; clients get internet and DNS through the container; SSDP discovery returns the container.
 On RouterOS (arm64, container on the LAN bridge) the Leigod app found and bound the container; that kernel lacks TPROXY/ipset,
-so the plugin runs in `tun` mode.
+so the plugin runs in `tun` mode; starting acceleration for PCs in the app brought up `tun_PC` and its routing rules.
 
-**Not verified yet:** actual game acceleration through the container.
+**Not verified yet:** game latency through the accelerator.
 See [docs/implementation.md](docs/implementation.md) for how the plugin was made to run outside OpenWrt.
 
 ## License
