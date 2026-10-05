@@ -14,8 +14,17 @@ SSDP_ADDR=239.255.255.250
 HTTP_PORT=5000
 WWW_DIR="${LEIGOD_RUN_DIR}/upnp"
 UUID_FILE="${LEIGOD_DIR}/upnp.uuid"
+SEEN_FILE="${LEIGOD_RUN_DIR}/ssdp.seen"
+# 与 OpenWrt 上 miniupnpd 的默认值一致（OS_NAME=OpenWrt，见 miniupnpd 的 configure 和 upnpdescstrings.h）
 SERVER="OpenWrt/24.10 UPnP/1.1 MiniUPnPd/2.3.7"
 MAX_AGE=120
+
+# socat 子进程的 stdout 是 UDP 应答，日志只能写文件和容器的标准输出（PID 1）
+diag() {
+    echo "$(date '+%F %T') $*" >> "$LEIGOD_LOG_FILE"
+    echo "$*" > /proc/1/fd/1 2>/dev/null
+    return 0
+}
 
 uuid() {
     cat "$UUID_FILE"
@@ -58,7 +67,15 @@ cmd_reply() {
     case "$man" in *ssdp:discover*) ;; *) return 0 ;; esac
 
     [ "$st" = "ssdp:all" ] && st="urn:schemas-upnp-org:device:InternetGatewayDevice:1"
-    st_supported "$st" || return 0
+    if ! st_supported "$st"; then
+        # 局域网里 Windows、电视等设备会频繁搜索各种类型，同一来源同一类型只记一次
+        if ! grep -qxF "${SOCAT_PEERADDR} ${st}" "$SEEN_FILE" 2>/dev/null; then
+            echo "${SOCAT_PEERADDR} ${st}" >> "$SEEN_FILE"
+            diag "UPnP: ${SOCAT_PEERADDR} 搜索 ${st}（不应答，同类只记一次）"
+        fi
+        return 0
+    fi
+    diag "UPnP: ${SOCAT_PEERADDR} 搜索 ${st}，已应答"
 
     ip=$(lan_ip)
     printf 'HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=%s\r\nST: %s\r\nUSN: %s\r\nEXT:\r\nSERVER: %s\r\nLOCATION: http://%s:%s/rootDesc.xml\r\nOPT: "http://schemas.upnp.org/upnp/1/0/"; ns=01\r\n01-NLS: 1\r\nBOOTID.UPNP.ORG: 1\r\nCONFIGID.UPNP.ORG: 1337\r\n\r\n' \
@@ -66,9 +83,8 @@ cmd_reply() {
 }
 
 write_desc() {
-    local u model
+    local u
     u=$(uuid)
-    model="Leigod ${LAN_IF}"
     mkdir -p "$WWW_DIR"
     cat > "$WWW_DIR/rootDesc.xml" <<EOT
 <?xml version="1.0"?>
@@ -78,12 +94,12 @@ write_desc() {
 <deviceType>urn:schemas-upnp-org:device:InternetGatewayDevice:1</deviceType>
 <friendlyName>OpenWrt router</friendlyName>
 <manufacturer>OpenWrt</manufacturer>
-<manufacturerURL>https://openwrt.org/</manufacturerURL>
-<modelDescription>OpenWrt router</modelDescription>
-<modelName>${model}</modelName>
-<modelNumber>1</modelNumber>
-<modelURL>https://openwrt.org/</modelURL>
-<serialNumber>00000000</serialNumber>
+<manufacturerURL>https://www.openwrt.org/</manufacturerURL>
+<modelDescription>OpenWrt with MiniUPnPd version 2.3.7 router</modelDescription>
+<modelName>OpenWrt router</modelName>
+<modelNumber>24.10</modelNumber>
+<modelURL>https://www.openwrt.org/</modelURL>
+<serialNumber>$(cat "/sys/class/net/${LAN_IF}/address")</serialNumber>
 <UDN>uuid:${u}</UDN>
 <serviceList><service>
 <serviceType>urn:schemas-upnp-org:service:Layer3Forwarding:1</serviceType>
@@ -94,7 +110,7 @@ write_desc() {
 <deviceType>urn:schemas-upnp-org:device:WANDevice:1</deviceType>
 <friendlyName>WANDevice</friendlyName>
 <manufacturer>MiniUPnP</manufacturer>
-<modelName>WAN Device</modelName>
+<modelName>MiniUPnPd</modelName>
 <UDN>uuid:${u%?}1</UDN>
 <serviceList><service>
 <serviceType>urn:schemas-upnp-org:service:WANCommonInterfaceConfig:1</serviceType>
@@ -147,7 +163,14 @@ cmd_run() {
     write_desc
 
     trap 'kill $pids 2>/dev/null; exit 0' TERM INT
-    busybox-extras httpd -f -p "${ip}:${HTTP_PORT}" -h "$WWW_DIR" &
+    # -v：每个请求打一行日志（来源 IP 和 URL），用来确认 app 有没有读取本机的设备描述
+    rm -f "$LEIGOD_RUN_DIR/httpd.fifo"
+    mkfifo "$LEIGOD_RUN_DIR/httpd.fifo"
+    while IFS= read -r line; do
+        diag "UPnP HTTP: $line"
+    done < "$LEIGOD_RUN_DIR/httpd.fifo" &
+    pids="$pids $!"
+    busybox-extras httpd -f -v -p "${ip}:${HTTP_PORT}" -h "$WWW_DIR" 2> "$LEIGOD_RUN_DIR/httpd.fifo" &
     pids="$pids $!"
     socat -T 2 "UDP4-RECVFROM:1900,ip-add-membership=${SSDP_ADDR}:${ip},reuseaddr,fork" \
         SYSTEM:"/opt/leigod/bin/ssdp.sh reply" 2>/dev/null &

@@ -40,6 +40,9 @@ Other uci/ubus calls (Wi-Fi, DHCP, LED settings for Leigod's own routers) fail h
 - Serial number: the plugin reports `{"model":"<arch>","sn":"<LAN MAC>","mac":"<LAN MAC>","brand":"openwrt"}`
 - Listens on TCP 5588 (local API for the app, incl. bind/unbind and a `shellExec` handler), UDP 6066, and TCP/UDP `10.20.30.40:6699`
   (transparent proxy, `IP_TRANSPARENT`)
+- The local API is `POST /api` with a JSON body `{"cmd": "<name>", ...}` (WebSocket on `/ws`); requests and responses are logged as
+  `[api] req:` / `[api] rsp:`. `getRouterInfo` returns `{"model":"<uname arch>","brand":"openwrt","fwver":"<DISTRIB_REVISION>","mac":…,"sn":…,"onece":…,"checkurl":…}`;
+  `fwver` comes from `/etc/openwrt_release`, which the image fills with an OpenWrt 24.10.0 release
 - Startup detection logs e.g. `[detect] ipset:1, tun:true, tcp:[TPROXY], udp:[TPROXY]`; `--mode auto` falls back to DNAT or tun
 - Rules: chain `GAMEACC` in `mangle`/`nat` `PREROUTING` and `filter` `INPUT`; ipsets `acctarget_<cat>` (device IPs),
   `accproxy_<cat>` (game server IPs), `accdirect_<cat>`; TPROXY with mark `0x99`, `ip rule fwmark 0x99 lookup 99`.
@@ -56,4 +59,6 @@ According to community guides, the app finds the router over UPnP, and the plugi
 (on OpenWrt, miniupnpd must be enabled). Alpine's miniupnpd only has the legacy iptables backend and would also offer port mappings,
 so `ssdp.sh` implements just the discovery part with `socat` and `busybox httpd`: it answers `M-SEARCH`
 for the IGD types and `ssdp:all` with a miniupnpd-style response, serves `rootDesc.xml` on port 5000, and sends `NOTIFY` every 30 s.
+The strings match miniupnpd built for OpenWrt (`OS_NAME=OpenWrt`: friendly/model name `OpenWrt router`, manufacturer `OpenWrt`).
+Answered searches, unanswered search types (once per source and type) and description requests are logged with a `UPnP` prefix.
 What exactly the app does after discovery is not known (the APK is packed), so this needs confirming with the real app.

@@ -37,9 +37,17 @@ On each device to accelerate (Switch / PS5 / Xbox / PC / phone):
 | **Gateway** | **The container's IP** |
 | **DNS** | **The container's IP** |
 
-Then, with a phone on the same LAN, open the Leigod app → router acceleration (路由器加速) and add/bind the router.
-The app finds routers over UPnP; the container answers as an OpenWrt UPnP gateway on its LAN IP.
-If the app finds the main router instead of the container, disable UPnP on the main router while binding.
+Then bind the router in the Leigod app (路由器加速 → install/bind the router plugin):
+
+1. Set the **phone's** gateway and DNS to the container too (static IP in the Wi-Fi settings), so the app talks to the container rather than the main router
+2. If the main router (or RouterOS itself) has UPnP enabled, disable it while binding; the app finds routers over UPnP,
+   and the container answers as an OpenWrt UPnP gateway
+3. If the app says the router is not supported (路由器型号暂不支持加速), check whether it reached the container:
+
+   ```sh
+   docker logs leigod | grep UPnP                        # SSDP searches answered / description fetched by the phone
+   docker exec leigod leigodctl plugin-log | grep '\[api\] req'   # requests from the app to the plugin (port 5588)
+   ```
 
 The plugin accelerates **by device category** (phone, PC, console, unknown): starting acceleration for a category in the app
 accelerates every device of that category whose traffic passes through the container.
