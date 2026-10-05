@@ -15,6 +15,7 @@ HTTP_PORT=5000
 WWW_DIR="${LEIGOD_RUN_DIR}/upnp"
 UUID_FILE="${LEIGOD_DIR}/upnp.uuid"
 SEEN_FILE="${LEIGOD_RUN_DIR}/ssdp.seen"
+HTTP_SEEN_FILE="${LEIGOD_RUN_DIR}/http.seen"
 # 与 OpenWrt 上 miniupnpd 的默认值一致（OS_NAME=OpenWrt，见 miniupnpd 的 configure 和 upnpdescstrings.h）
 SERVER="OpenWrt/24.10 UPnP/1.1 MiniUPnPd/2.3.7"
 MAX_AGE=120
@@ -163,14 +164,25 @@ cmd_run() {
     write_desc
 
     trap 'kill $pids 2>/dev/null; exit 0' TERM INT
-    # -v：每个请求打一行日志（来源 IP 和 URL），用来确认 app 有没有读取本机的设备描述
+    # -vv 每个请求打两行日志（"ip:port: url:/x" 和 "ip:port: response:404"）。
+    # 局域网里的 Windows / 游戏主机会把本机当作 UPnP 网关反复读取端口映射服务的描述（本机不提供，返回 404），
+    # 同一来源同一路径只记一次
     rm -f "$LEIGOD_RUN_DIR/httpd.fifo"
     mkfifo "$LEIGOD_RUN_DIR/httpd.fifo"
     while IFS= read -r line; do
-        diag "UPnP HTTP: $line"
+        case "$line" in
+            *": url:"*) conn=${line%%: url:*}; url=${line#*: url:} ;;
+            *": response:"*)
+                [ "${line%%: response:*}" = "$conn" ] || continue
+                key="${conn%:*} ${url} ${line#*: response:}"
+                grep -qxF "$key" "$HTTP_SEEN_FILE" 2>/dev/null && continue
+                echo "$key" >> "$HTTP_SEEN_FILE"
+                diag "UPnP HTTP: ${conn%:*} 读取 ${url} -> ${line#*: response:}（同一来源同一路径只记一次）"
+                ;;
+        esac
     done < "$LEIGOD_RUN_DIR/httpd.fifo" &
     pids="$pids $!"
-    busybox-extras httpd -f -v -p "${ip}:${HTTP_PORT}" -h "$WWW_DIR" 2> "$LEIGOD_RUN_DIR/httpd.fifo" &
+    busybox-extras httpd -f -vv -p "${ip}:${HTTP_PORT}" -h "$WWW_DIR" 2> "$LEIGOD_RUN_DIR/httpd.fifo" &
     pids="$pids $!"
     socat -T 2 "UDP4-RECVFROM:1900,ip-add-membership=${SSDP_ADDR}:${ip},reuseaddr,fork" \
         SYSTEM:"/opt/leigod/bin/ssdp.sh reply" 2>/dev/null &

@@ -51,6 +51,11 @@ Then bind the router in the Leigod app (路由器加速 → install/bind the rou
    docker exec leigod leigodctl plugin-log | tail     # the plugin's web API log
    ```
 
+The container's UPnP announcement only exists for the app to find it. Windows PCs and consoles see it too, take the container
+for a UPnP gateway and try to read its port-mapping services, which it does not provide (logged once per device and path as
+`UPnP HTTP: ... -> 404`). Once the router is bound, you can set `UPNP=0` and re-enable UPnP on the main router,
+so consoles get their port mappings there; turn it back on if the app needs to find the router again.
+
 The plugin accelerates **by device category** (phone, PC, console, unknown): starting acceleration for a category in the app
 accelerates every device of that category whose traffic passes through the container.
 Devices are classified automatically (MAC lists, mDNS, NetBIOS, HTTP User-Agent).
