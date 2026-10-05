@@ -291,8 +291,11 @@ on_term() {
     exit 0
 }
 
-# 日志文件只保留本次启动的内容
+# 重启容器（RouterOS、docker restart）时文件系统保留，网络是全新的：清掉上次运行的状态，
+# 相当于路由器重启后 /tmp 被清空（env.conf 里的 LAN_IF=br-lan、插件的锁和运行状态等）
+rm -rf "$LEIGOD_RUN_DIR" /tmp/acc /tmp/leigod_* /tmp/acc_*
 mkdir -p "$(dirname "$LEIGOD_LOG_FILE")" "$LEIGOD_DIR/config" "$LEIGOD_DIR/bin" "$LEIGOD_RUN_DIR"
+# 日志文件只保留本次启动的内容
 : > "$LEIGOD_LOG_FILE"
 
 load_conf
