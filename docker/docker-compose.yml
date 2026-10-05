@@ -1,0 +1,34 @@
+# The container must be on the LAN subnet: macvlan gives it its own LAN IP, which clients use as gateway and DNS.
+# Note: with macvlan the Docker host itself cannot reach the container's IP (a macvlan limitation).
+services:
+  leigod:
+    image: ghcr.io/oexi/leigod-plugin-linux:latest
+    container_name: leigod
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.send_redirects=0
+      - net.ipv4.conf.default.send_redirects=0
+    volumes:
+      - ./leigod:/etc/leigod
+    networks:
+      lan:
+        ipv4_address: 192.168.1.3
+        # The plugin uses the LAN MAC as its serial number: keep it fixed, or the app sees a new router
+        # (and the device must be bound again) every time the container is recreated
+        mac_address: 02:42:c0:a8:01:03
+
+networks:
+  lan:
+    driver: macvlan
+    driver_opts:
+      parent: eth0
+    ipam:
+      config:
+        - subnet: 192.168.1.0/24
+          gateway: 192.168.1.1

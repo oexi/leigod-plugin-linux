@@ -1,0 +1,5 @@
+DISTRIB_ID='OpenWrt'
+DISTRIB_RELEASE='24.10'
+DISTRIB_REVISION='docker'
+DISTRIB_TARGET='docker'
+DISTRIB_DESCRIPTION='OpenWrt 24.10 (leigod-plugin-linux on Alpine)'

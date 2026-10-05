@@ -1,0 +1,8 @@
+NAME="OpenWrt"
+VERSION="24.10"
+ID="openwrt"
+ID_LIKE="lede openwrt"
+PRETTY_NAME="OpenWrt 24.10 (leigod-plugin-linux on Alpine)"
+VERSION_ID="24.10"
+HOME_URL="https://github.com/oexi/leigod-plugin-linux"
+OPENWRT_BOARD="docker"
