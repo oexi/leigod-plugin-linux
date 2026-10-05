@@ -1,18 +1,20 @@
 #!/bin/sh
 # 容器入口（由 tini 启动）
 #
-#   1. 生成 uci 配置（插件靠 /etc/os-release 的 ID=openwrt 走 OpenWrt 分支，配置都通过 uci 读写）
-#   2. 从雷神服务器下载/更新插件，失败时用 /etc/leigod/bin 里的缓存
-#   3. 配置旁路网关（转发、NAT），后台运行 dnsmasq、UPnP 通告和插件，退出的自动重启
-#   4. 收到 SIGTERM 时让插件自行清理规则后退出，再撤销网关规则
+#   1. 把容器网卡放进网桥 br-lan（插件只在网桥上找局域网设备），IP 和路由移到网桥上
+#   2. 从雷神服务器下载/更新插件（acc-bundle-<arch>.tar.gz），失败时用 /etc/leigod/bin 里的缓存
+#   3. 生成插件配置（/etc/config/*.ini、uci network），配置旁路网关（转发、NAT）
+#   4. 后台运行 dnsmasq、UPnP 通告和插件，退出的自动重启
+#   5. 收到 SIGTERM 时清理插件的规则、结束插件，再撤销网关规则
 
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 . /opt/leigod/bin/common.sh
 
-CONF_KEYS="LAN_IF GATEWAY MASQUERADE DNS DNS_UPSTREAM FILTER_AAAA UPNP ACC_MODE PLUGIN_URL UPDATE_ON_START"
+CONF_KEYS="LAN_IF GATEWAY MASQUERADE DNS DNS_UPSTREAM FILTER_AAAA UPNP ACC_MODE PLUGIN_URL UPDATE_ON_START UPGRADE_MONITOR"
 PIDS=""
 PLUGIN_LOOP_PID=""
 SLEEP_PID=""
+TPROXY_IP="10.20.30.40"
 
 die() {
     log "ERROR: $*"
@@ -28,6 +30,49 @@ write_env_conf() {
         eval "v=\$$k"
         printf "%s='%s'\n" "$k" "$(printf '%s' "$v" | sed "s/'/'\\\\''/g")" >> "$LEIGOD_RUN_DIR/env.conf"
     done
+}
+
+# 插件的两个硬性要求：
+#   - 只在网桥上监听邻居表、抓包识别设备：把容器网卡放进网桥 br-lan，IP 和路由移到网桥上
+#     （网桥用网卡的 MAC，局域网里看到的地址不变）
+#   - 用 /sys/class/net/eth0/address 作为 SN：网卡不叫 eth0 时（RouterOS 上叫 vethN），
+#     建一个同 MAC 的占位接口 eth0（不改 RouterOS 管理的网卡名）
+setup_bridge() {
+    local port=$LAN_IF mac mtu addrs routes a r
+    if [ "$port" = "$BRIDGE" ]; then
+        log "网桥 ${BRIDGE} 已存在"
+        return 0
+    fi
+    mac=$(cat "/sys/class/net/${port}/address")
+    mtu=$(cat "/sys/class/net/${port}/mtu")
+    addrs=$(ip -4 -o addr show dev "$port" scope global | awk '{print $4}')
+    routes=$(ip -4 route show dev "$port" | grep -v ' proto kernel ')
+
+    ip link add "$BRIDGE" type bridge stp_state 0 forward_delay 0 || die "创建网桥 ${BRIDGE} 失败"
+    ip link set dev "$BRIDGE" address "$mac" mtu "$mtu"
+    for a in $addrs; do
+        ip addr del "$a" dev "$port"
+    done
+    ip link set dev "$port" master "$BRIDGE" || die "无法把 ${port} 加入网桥（ipvlan 网卡不能加入网桥，请改用 macvlan 或 veth）"
+    ip link set dev "$port" up
+    ip link set dev "$BRIDGE" up
+    for a in $addrs; do
+        ip addr add "$a" dev "$BRIDGE"
+    done
+    # 默认路由等非直连路由搬到网桥上
+    echo "$routes" | while read -r r; do
+        # shellcheck disable=SC2086
+        [ -n "$r" ] && ip route replace $r dev "$BRIDGE"
+    done
+    log "已将 ${port} 加入网桥 ${BRIDGE}（MAC ${mac}，地址 $(echo $addrs)）"
+
+    if ! iface_exists eth0; then
+        { ip link add eth0 type dummy || ip link add eth0 type veth peer name eth0-peer; } 2>/dev/null \
+            || die "无法创建占位接口 eth0"
+        ip link set dev eth0 address "$mac"
+        log "已创建占位接口 eth0（MAC ${mac}，插件用它作为 SN）"
+    fi
+    LAN_IF=$BRIDGE
 }
 
 # USE_IPTABLES_NFT_BACKEND=1 用 nft，0 用 legacy；默认：nf_tables 可用且 legacy 里没有更多规则时用 nft
@@ -60,40 +105,106 @@ check_env() {
         mkdir -p /dev/net
         mknod /dev/net/tun c 10 200 2>/dev/null && chmod 666 /dev/net/tun
     fi
-    [ -c /dev/net/tun ] || log "WARN: /dev/net/tun 不可用（docker 需要 --device /dev/net/tun），tun 加速模式无法使用"
     iptables -w -S >/dev/null 2>&1 || die "无法操作 iptables（docker 需要 --cap-add NET_ADMIN）"
-    ipset list -n >/dev/null 2>&1 || log "WARN: ipset 不可用（内核缺少 ip_set 模块？），插件会退回较慢的模式"
 }
 
-# 插件读写的 uci 配置：/etc/config 是指向 /etc/leigod/config 的软链接
-setup_uci() {
-    local addr
-    mkdir -p "$LEIGOD_DIR/config"
-    if [ ! -s /etc/config/accelerator ]; then
-        # 与官方安装脚本 plugin_common.sh 的 install_openwrt_series_config 相同
-        touch /etc/config/accelerator
-        uci -q batch <<EOT
-set accelerator.base=system
-set accelerator.bind=bind
-set accelerator.device=hardware
-set accelerator.Phone=acceleration
-set accelerator.PC=acceleration
-set accelerator.Game=acceleration
-set accelerator.Unknown=acceleration
-set accelerator.base.url='https://opapi.nn.com/speed/router/plug/check'
-set accelerator.base.heart='https://opapi.nn.com/speed/router/heartbeat'
-set accelerator.base.base_url='https://opapi.nn.com/speed'
-commit accelerator
-EOT
-        log "已生成 /etc/config/accelerator"
+# 加速模式：tproxy（需要内核 TPROXY 和 ipset）优先，否则 tun（与官方安装脚本的探测顺序相同）
+detect_acc_mode() {
+    local ok=1
+    case "$ACC_MODE" in
+        tproxy|tun) log "加速模式: ${ACC_MODE}（ACC_MODE 指定）"; return 0 ;;
+    esac
+    iptables -w -t mangle -N LEIGOD_PROBE 2>/dev/null
+    iptables -w -t mangle -A LEIGOD_PROBE -p udp -j TPROXY --on-port 1 --on-ip 127.0.0.1 --tproxy-mark 0x1/0x1 2>/dev/null || ok=0
+    iptables -w -t mangle -F LEIGOD_PROBE 2>/dev/null
+    iptables -w -t mangle -X LEIGOD_PROBE 2>/dev/null
+    if [ $ok = 1 ]; then
+        { ipset create leigod_probe hash:net && ipset destroy leigod_probe; } 2>/dev/null || ok=0
     fi
-    # 插件抓包、扫描设备、设置 TPROXY 用的网卡（OpenWrt 上 luci "设备管理 -> 路由设备"）
-    uci -q set accelerator.base.neigh="$LAN_IF"
-    uci -q commit accelerator
+    if [ $ok = 1 ]; then
+        ACC_MODE=tproxy
+    elif [ -c /dev/net/tun ]; then
+        ACC_MODE=tun
+        log "WARN: 内核不支持 TPROXY 或 ipset，降级为 tun 模式"
+    else
+        die "TPROXY/ipset 和 /dev/net/tun 都不可用（docker 需要 --device /dev/net/tun）"
+    fi
+    log "加速模式: ${ACC_MODE}"
+}
 
-    # 插件从 network.lan 取本机网段
+# 下载插件包并安装到 /etc/leigod/bin（/usr/sbin/leigod 指向这里）
+fetch_plugin() {
+    local arch url tmp bin new cur
+    arch=$(plugin_arch)
+    bin=$(plugin_bin)
+    url="${PLUGIN_URL%/}/acc-bundle-${arch}.tar.gz"
+    cur=$(plugin_version "$bin")
+
+    if [ -n "$cur" ] && [ "$UPDATE_ON_START" != "1" ]; then
+        log "插件版本 ${cur}（UPDATE_ON_START=0，不检查更新）"
+    else
+        tmp="$LEIGOD_RUN_DIR/bundle"
+        rm -rf "$tmp"
+        mkdir -p "$tmp"
+        log "下载插件: $url"
+        if curl -fsSL --connect-timeout 10 --retry 2 -m 300 -o "$tmp/bundle.tar.gz" "$url" \
+            && tar -xzf "$tmp/bundle.tar.gz" -C "$tmp" \
+            && [ -s "$tmp/ipdatacloud_country.xdb" ] \
+            && chmod +x "$tmp/${PLUGIN_PREFIX}.${arch}" \
+            && new=$(plugin_version "$tmp/${PLUGIN_PREFIX}.${arch}") && [ -n "$new" ]; then
+            if [ -n "$cur" ] && cmp -s "$tmp/${PLUGIN_PREFIX}.${arch}" "$bin"; then
+                log "插件已是最新：版本 ${cur}"
+            else
+                mv -f "$tmp/${PLUGIN_PREFIX}.${arch}" "$bin"
+                log "插件已${cur:+从 ${cur} }更新为版本 ${new}（${PLUGIN_PREFIX}.${arch}）"
+            fi
+            mv -f "$tmp/ipdatacloud_country.xdb" "$PLUGIN_CONF_DIR/ipdatacloud_country.xdb"
+            # app 卸载插件时调用工作目录下的 leigod_uninstall.sh
+            [ -f "$tmp/uninstall-runtime.sh" ] && mv -f "$tmp/uninstall-runtime.sh" "$PLUGIN_DIR/leigod_uninstall.sh"
+        else
+            [ -n "$cur" ] || die "插件下载失败且没有缓存，请检查网络（PLUGIN_URL=${PLUGIN_URL}）"
+            log "WARN: 插件下载失败，使用缓存的版本 ${cur}"
+        fi
+        rm -rf "$tmp"
+    fi
+    # 升级程序是同一个二进制（官方安装脚本也是软链接）
+    ln -sf "${PLUGIN_PREFIX}.${arch}" "$PLUGIN_DIR/acc_upgrade_monitor"
+    [ -s "$PLUGIN_CONF_DIR/ipdatacloud_country.xdb" ] || die "缺少 IP 库 ${PLUGIN_CONF_DIR}/ipdatacloud_country.xdb"
+}
+
+# 插件配置，与官方安装脚本（router_plugin_new 的 lib/setup.sh）生成的相同
+write_plugin_conf() {
+    local addr
+    if [ ! -s "$PLUGIN_CONF_DIR/accelerator.ini" ]; then
+        cat > "$PLUGIN_CONF_DIR/accelerator.ini" <<EOT
+[base]
+url="https://opapi.xxghh.biz/speed/router/plug/check"
+channel="2"
+appid="nnMobile_d0k3duup"
+heart="https://opapi.xxghh.biz/speed/router/heartbeat"
+base_url="https://opapi.xxghh.biz/speed"
+
+[update]
+domain="https://opapi.xxghh.biz/nn-version/version/plug/upgrade"
+
+[device]
+EOT
+        log "已生成 ${PLUGIN_CONF_DIR}/accelerator.ini"
+    fi
+    cat > "$PLUGIN_CONF_DIR/acc_firewall.ini" <<EOT
+[firewall]
+backend=iptables
+mode=${ACC_MODE}
+tproxy_ip=${TPROXY_IP}
+EOT
+    cat > "$PLUGIN_CONF_DIR/acc_version.ini" <<EOT
+[info]
+version="$(plugin_version "$(plugin_bin)")"
+EOT
+
+    # 插件从 uci network.lan 取本机网段
     addr=$(lan_addr)
-    : > /etc/config/network
+    [ -f "$PLUGIN_CONF_DIR/network" ] || touch "$PLUGIN_CONF_DIR/network"
     uci -q batch <<EOT
 set network.loopback=interface
 set network.loopback.device='lo'
@@ -109,41 +220,20 @@ commit network
 EOT
 }
 
-# 校验下载的插件：ELF 且能输出版本号
-plugin_version() {
-    [ "$(head -c 4 "$1" 2>/dev/null | tail -c 3)" = "ELF" ] || return 1
-    chmod +x "$1"
-    "$1" --version 2>&1 | grep -oE '[0-9]{8,}' | head -n 1
-}
-
-fetch_plugin() {
-    local arch url tmp new cur
-    arch=$(plugin_arch)
-    url="${PLUGIN_URL%/}/acc-gw.linux.${arch}"
-    mkdir -p "$(dirname "$PLUGIN_BIN")"
-    cur=$(plugin_version "$PLUGIN_BIN")
-
-    if [ -n "$cur" ] && [ "$UPDATE_ON_START" != "1" ]; then
-        log "插件版本 ${cur}（UPDATE_ON_START=0，不检查更新）"
-        return 0
-    fi
-
-    tmp="${PLUGIN_BIN}.download"
-    rm -f "$tmp"
-    log "下载插件: $url"
-    if curl -fsSL --connect-timeout 10 --retry 2 -m 300 -o "$tmp" "$url" && new=$(plugin_version "$tmp"); then
-        if [ -n "$cur" ] && cmp -s "$tmp" "$PLUGIN_BIN"; then
-            rm -f "$tmp"
-            log "插件已是最新：版本 ${cur}"
-        else
-            mv -f "$tmp" "$PLUGIN_BIN"
-            log "插件已${cur:+从 ${cur} }更新为版本 ${new}（acc-gw.linux.${arch}）"
-        fi
-        return 0
-    fi
-    rm -f "$tmp"
-    [ -n "$cur" ] || die "插件下载失败且没有缓存，请检查网络（PLUGIN_URL=${PLUGIN_URL}）"
-    log "WARN: 插件下载失败，使用缓存的版本 ${cur}"
+# 插件写的规则（与官方 acc.init 的 _clean_acc_rules 相同）
+clean_plugin_rules() {
+    local tbl built name
+    for tbl in mangle filter nat; do
+        case "$tbl" in filter) built=INPUT ;; *) built=PREROUTING ;; esac
+        iptables -w -t "$tbl" -D "$built" -j GAMEACC 2>/dev/null
+        iptables -w -t "$tbl" -F GAMEACC 2>/dev/null
+        iptables -w -t "$tbl" -X GAMEACC 2>/dev/null
+    done
+    for name in $(ipset list -n 2>/dev/null); do
+        case "$name" in
+            direct_*|target_*|proxy_*) ipset destroy "$name" 2>/dev/null ;;
+        esac
+    done
 }
 
 # 子进程退出后 5 秒重启（相当于 procd 的 respawn）
@@ -160,22 +250,33 @@ respawn() {
     done
 }
 
+# daemon 自己拉起 web（端口 5588）等子进程；用完整路径启动，插件靠 ps 输出里的路径找自己的进程
 run_plugin() {
-    mkdir -p "$PLUGIN_DATA_DIR" "$PLUGIN_TMP_DIR"
-    cd "$PLUGIN_DATA_DIR" || exit 1
-    log "启动插件: acc-gw --env release -i ${LAN_IF} --mode ${ACC_MODE}"
-    exec "$PLUGIN_BIN" --env release -i "$LAN_IF" -d "$PLUGIN_DATA_DIR" --mode "$ACC_MODE" >/dev/null 2>&1
+    local args="-r daemon -m ${ACC_MODE} -p 5588"
+    [ "$ACC_MODE" = tproxy ] && args="$args -l ${TPROXY_IP}"
+    cd "$PLUGIN_DIR" || exit 1
+    # 上一次留下的子进程（web 等）先结束
+    # shellcheck disable=SC2046
+    kill -9 $(plugin_pids "-r daemon") $(plugin_pids "-r web") $(plugin_pids "-r acc") 2>/dev/null
+    log "启动插件: $(plugin_bin) ${args}"
+    # shellcheck disable=SC2086
+    exec "$(plugin_bin)" $args >/dev/null 2>&1
+}
+
+run_upgrade_monitor() {
+    cd "$PLUGIN_DIR" || exit 1
+    exec "$PLUGIN_DIR/acc_upgrade_monitor" -r upgrade >/dev/null 2>&1
 }
 
 cleanup() {
     trap - TERM INT
-    # 先停插件：它收到 SIGTERM 后删除自己的 iptables / ipset / 策略路由
-    if [ -n "$PLUGIN_LOOP_PID" ]; then
-        kill -TERM "$PLUGIN_LOOP_PID" 2>/dev/null
-        wait "$PLUGIN_LOOP_PID" 2>/dev/null
-    fi
+    [ -n "$PLUGIN_LOOP_PID" ] && kill -TERM "$PLUGIN_LOOP_PID" 2>/dev/null
     [ -n "$PIDS" ] && kill -TERM $PIDS 2>/dev/null
     [ -n "$SLEEP_PID" ] && kill "$SLEEP_PID" 2>/dev/null
+    # 先清规则再结束插件：规则删除后流量立即回到正常路由
+    clean_plugin_rules
+    # shellcheck disable=SC2046
+    kill -9 $(plugin_pids) 2>/dev/null
     wait 2>/dev/null
     /opt/leigod/bin/gateway.sh down
     log "已停止"
@@ -188,19 +289,22 @@ on_term() {
 }
 
 # 日志文件只保留本次启动的内容
-mkdir -p "$(dirname "$LEIGOD_LOG_FILE")" "$LEIGOD_DIR"
+mkdir -p "$(dirname "$LEIGOD_LOG_FILE")" "$LEIGOD_DIR/config" "$LEIGOD_DIR/bin" "$LEIGOD_RUN_DIR"
 : > "$LEIGOD_LOG_FILE"
 
 load_conf
 detect_lan_if || die "找不到局域网网卡（LAN_IF=${LAN_IF:-自动}）"
+[ -n "$(lan_addr)" ] || die "${LAN_IF} 没有 IPv4 地址"
+setup_bridge
 write_env_conf
 select_iptables_backend
 check_env
+detect_acc_mode
 fetch_plugin
 
 trap on_term TERM INT
 /opt/leigod/bin/gateway.sh up || die "网关环境配置失败"
-setup_uci
+write_plugin_conf
 if [ "$GATEWAY" = 1 ] && [ "$(cat /proc/sys/net/ipv4/ip_forward)" != 1 ]; then
     log "WARN: net.ipv4.ip_forward 未开启，局域网设备无法通过本容器上网（docker 加 --sysctl net.ipv4.ip_forward=1）"
 fi
@@ -215,6 +319,10 @@ if [ "$DNS" = 1 ]; then
 fi
 if [ "$UPNP" = 1 ]; then
     respawn "UPnP 通告" /opt/leigod/bin/ssdp.sh run &
+    PIDS="$PIDS $!"
+fi
+if [ "$UPGRADE_MONITOR" = 1 ]; then
+    respawn 升级程序 run_upgrade_monitor &
     PIDS="$PIDS $!"
 fi
 respawn 插件 run_plugin &

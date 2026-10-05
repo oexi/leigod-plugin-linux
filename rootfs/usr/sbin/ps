@@ -1,0 +1,5 @@
+#!/bin/sh
+# 插件用 "ps w | grep ..." 找自己的进程，并按 OpenWrt busybox ps 的列（PID USER VSZ STAT COMMAND）解析；
+# Alpine busybox ps 默认少一列（PID USER TIME COMMAND），插件会误判进程不存在而不停重复启动
+[ $# -gt 0 ] && [ "$1" != w ] && exec busybox ps "$@"
+exec busybox ps -o pid,user,vsz,stat,args

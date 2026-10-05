@@ -1,7 +1,12 @@
 #!/bin/sh
-# 代替 OpenWrt 的 /etc/init.d/acc：插件或 app 要求重启服务时，结束插件进程，由入口脚本重新拉起
+# 代替 OpenWrt 的 /etc/init.d/acc：插件或 app 要求启停服务时，结束插件进程，由入口脚本重新拉起
+. /opt/leigod/bin/common.sh
 case "$1" in
-    start|restart|reload|stop) kill $(pidof acc-gw) 2>/dev/null; exit 0 ;;
+    start|restart|reload|stop)
+        # shellcheck disable=SC2046
+        kill -9 $(plugin_pids) 2>/dev/null
+        exit 0
+        ;;
     enable|disable|enabled) exit 0 ;;
     *) echo "用法: $0 {start|stop|restart}" >&2; exit 1 ;;
 esac

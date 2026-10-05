@@ -1,101 +1,67 @@
 #!/bin/sh
 # 容器内管理命令
 #
-#   leigodctl status                  运行状态、网关地址、绑定和加速状态
+#   leigodctl status                  运行状态、网关地址、加速状态
 #   leigodctl log [-f]                本镜像脚本的日志
-#   leigodctl plugin-log [-f]         插件自己的日志（/tmp/acc/acc-gw.log-N.log）
-#   leigodctl devices                 插件识别到的设备和类型
-#   leigodctl device <MAC> <类型>      手动指定设备类型（识别错误时），然后重启插件
+#   leigodctl plugin-log [-f] [daemon|web|upgrade]
+#                                     插件自己的日志（默认 web：app 请求、设备识别、加速）
+#   leigodctl devices                 局域网里经过本机的设备（ARP 表）
 #   leigodctl restart                 重启插件（入口脚本 5 秒内拉起）
 
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 . /opt/leigod/bin/common.sh
 
-# 与官方 luci 设备管理页（device.lua）相同的类型编号
-TYPES="0:None 1:XBox 2:Switch 3:PlayStation 4:SteamDeck 5:Windows 6:MacBook 7:Android 8:iPhone 9:Unknown 20:Oculus 21:HTCVive 22:Pico"
-
-type_name() {
-    local t
-    for t in $TYPES; do
-        [ "${t%%:*}" = "$1" ] && { echo "${t#*:}"; return; }
-    done
-    echo "${1:-自动}"
-}
-
-state_name() {
-    case "$1" in
-        1) echo 加速中 ;;
-        2) echo 已停止 ;;
-        3) echo 已暂停 ;;
-        *) echo 未加速 ;;
-    esac
+yes_no() {
+    [ -n "$1" ] && echo "运行中 (pid $(echo $1))" || echo 未运行
 }
 
 cmd_status() {
-    local pid ver t token
-    pid=$(plugin_pid)
-    # 插件有单实例锁，运行时不能再执行 --version；它启动时把版本号写在这里
-    ver=$(cat /var/nn/acc-gw.app.ver 2>/dev/null)
-    if [ -n "$pid" ]; then
-        echo "插件: 运行中 (pid ${pid}, 版本 ${ver:-?}, $(plugin_arch))"
-    else
-        echo "插件: 未运行 (版本 ${ver:-?})"
-    fi
-    echo "LAN: ${LAN_IF} $(lan_addr)    MAC/SN: $(cat "/sys/class/net/${LAN_IF}/address" 2>/dev/null)"
+    echo "插件: 版本 $(plugin_version "$(plugin_bin)" || echo ?)，$(plugin_arch)，模式 $(sed -n 's/^mode=//p' "$PLUGIN_CONF_DIR/acc_firewall.ini" 2>/dev/null)"
+    echo "  daemon   $(yes_no "$(plugin_pids '-r daemon')")"
+    echo "  web      $(yes_no "$(plugin_pids '-r web')")"
+    echo "  upgrade  $(yes_no "$(plugin_pids '-r upgrade')")"
+    echo "LAN: ${LAN_IF} $(lan_addr)    SN(eth0 MAC): $(cat /sys/class/net/eth0/address 2>/dev/null)"
     echo "局域网设备设置：网关 = $(lan_ip)    DNS = $(lan_ip)"
-    token=$(uci -q get accelerator.base.token)
-    echo "绑定: $([ -n "$token" ] && echo 已绑定 || echo 未绑定)"
-    for t in Phone PC Game Unknown; do
-        printf '  %-8s %s\n' "$t" "$(state_name "$(uci -q get "accelerator.${t}.state")")"
-    done
+    echo "加速状态: $(cat /tmp/acc/acc_core_conf.json 2>/dev/null || echo 无)"
     echo "UPnP 通告: $(pgrep -f 'UDP4-RECVFROM:1900' >/dev/null && echo 运行中 || echo 未运行)"
     echo "DNS: $(pidof dnsmasq >/dev/null && echo 运行中 || echo 未运行)"
 }
 
 cmd_devices() {
-    local ip mac key t
-    printf '%-16s %-18s %s\n' IP MAC 类型
-    # 和 luci 设备管理页一样：LAN 口上可达的 ARP 表项
-    awk -v ifc="$LAN_IF" 'NR > 1 && $6 == ifc && $3 == "0x2" {print $1, $4}' /proc/net/arp |
-    while read -r ip mac; do
-        key=$(echo "$mac" | tr -d ':')
-        t=$(uci -q get "accelerator.device.${key}")
-        printf '%-16s %-18s %s\n' "$ip" "$mac" "$(type_name "$t")"
-    done
-}
-
-cmd_device() {
-    local mac=$1 typ=$2 t key
-    [ -n "$mac" ] && [ -n "$typ" ] || { echo "用法: leigodctl device <MAC> <类型>，类型: $TYPES" >&2; exit 2; }
-    for t in $TYPES; do
-        case "$typ" in
-            "${t%%:*}"|"${t#*:}") typ=${t%%:*}; key=1 ;;
-        esac
-    done
-    [ -n "$key" ] || { echo "未知类型 ${typ}，可选: $TYPES" >&2; exit 2; }
-    key=$(echo "$mac" | tr -d ':-' | tr 'A-F' 'a-f')
-    echo "$key" | grep -qE '^[0-9a-f]{12}$' || { echo "MAC 格式错误: $mac" >&2; exit 2; }
-    uci set "accelerator.device.${key}=${typ}" && uci commit accelerator
-    echo "${mac} -> $(type_name "$typ")，重启插件生效"
-    cmd_restart
+    printf '%-16s %s\n' IP MAC
+    awk -v ifc="$LAN_IF" 'NR > 1 && $6 == ifc && $3 == "0x2" {printf "%-16s %s\n", $1, $4}' /proc/net/arp
 }
 
 cmd_restart() {
-    local pid
-    pid=$(plugin_pid)
-    [ -n "$pid" ] || { echo "插件未运行"; return; }
-    kill "$pid" && echo "已重启插件（入口脚本 5 秒后重新拉起）"
+    local pids
+    pids=$(plugin_pids)
+    [ -n "$pids" ] || { echo "插件未运行"; return; }
+    # shellcheck disable=SC2086
+    kill -9 $pids && echo "已重启插件（入口脚本 5 秒后重新拉起）"
 }
 
 show_log() {
     local f=$1
     shift
-    [ -n "$f" ] && [ -f "$f" ] || { echo "没有日志文件" >&2; exit 1; }
+    [ -n "$f" ] && [ -f "$f" ] || { echo "没有日志文件 $f" >&2; exit 1; }
     if [ "$1" = "-f" ]; then
         tail -n 100 -F "$f"
     else
         cat "$f"
     fi | sed 's/\x1b\[[0-9;]*m//g'
+}
+
+cmd_plugin_log() {
+    local follow="" name=web_api a
+    for a in "$@"; do
+        case "$a" in
+            -f) follow=-f ;;
+            daemon) name=acc_daemon ;;
+            web) name=web_api ;;
+            upgrade) name=$(ls "$PLUGIN_LOG_DIR" 2>/dev/null | grep -i upgrade | head -n 1); name=${name%.log} ;;
+        esac
+    done
+    show_log "$PLUGIN_LOG_DIR/${name}.log" $follow
 }
 
 load_conf
@@ -104,9 +70,8 @@ detect_lan_if
 case "$1" in
     status|"")  cmd_status ;;
     log)        shift; show_log "$LEIGOD_LOG_FILE" "$@" ;;
-    plugin-log) shift; show_log "$(plugin_log_file)" "$@" ;;
+    plugin-log) shift; cmd_plugin_log "$@" ;;
     devices)    cmd_devices ;;
-    device)     shift; cmd_device "$@" ;;
     restart)    cmd_restart ;;
     *)
         sed -n '2,10s/^# \{0,1\}//p' "$0"
