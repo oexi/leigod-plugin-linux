@@ -285,17 +285,6 @@ cleanup() {
     log "已停止"
 }
 
-# 设备关机后内核只把它的邻居表条目标成 STALE，表里不到 gc_thresh1（默认 128）条时不会回收；
-# 插件只在条目被删除时把设备判为离线，app 里关机的设备就一直在。
-# 探测 STALE 的条目，没有回应的和解析失败（FAILED）的删掉（设备再发包时会重新加入）
-reap_stale_neigh() {
-    local ip state
-    ip -4 neigh show dev "$BRIDGE" nud stale nud failed 2>/dev/null | awk '{print $1, $NF}' | while read -r ip state; do
-        [ "$state" = STALE ] && arping -q -f -c 2 -w 3 -I "$BRIDGE" "$ip" >/dev/null 2>&1 && continue
-        ip neigh del "$ip" dev "$BRIDGE" 2>/dev/null && log "设备 ${ip} 无响应，已从邻居表删除（插件将其视为离线）"
-    done
-}
-
 on_term() {
     log "收到停止信号"
     cleanup
@@ -348,11 +337,10 @@ PLUGIN_LOOP_PID=$!
 ip4=$(lan_ip)
 log "局域网设备设置：网关 = ${ip4}    DNS = ${ip4}"
 
-# 每分钟检查网关规则（防火墙重载、LAN 地址变化）、清理已离线设备的邻居表条目
+# 每分钟检查网关规则（防火墙重载、LAN 地址变化）
 while :; do
     sleep 60 &
     SLEEP_PID=$!
     wait "$SLEEP_PID"
     /opt/leigod/bin/gateway.sh ensure
-    reap_stale_neigh
 done
