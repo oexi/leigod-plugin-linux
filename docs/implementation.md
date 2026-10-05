@@ -38,6 +38,10 @@ The entrypoint reproduces these files and runs the same two commands under its o
 - **Bridge**: device discovery (`NetlinkListener.cpp`) scans `/sys/class/net/*/bridge` for a bridge (ignoring `docker0` and `br-miot`)
   and falls back to `br-lan`; pcap also opens that bridge. There is no setting for it, so the entrypoint creates `br-lan`,
   enslaves the container interface and moves its addresses and routes onto the bridge (same MAC). veth and macvlan can be bridge ports, ipvlan cannot
+- **Offline devices**: the plugin adds a device on a netlink neighbour event and only treats it as offline when the
+  neighbour entry is deleted. When a device powers off, the kernel just leaves its entry `STALE` (garbage collection does
+  not run below `gc_thresh1`, 128 entries), so the app kept listing it. Every minute the entrypoint ARP-probes `STALE`
+  entries on `br-lan` and deletes those that do not answer, as well as `FAILED` ones
 - **Serial number**: read from `/sys/class/net/eth0/address`. On RouterOS the interface is `vethN`, so a placeholder `eth0`
   (dummy, or a veth pair if the kernel has no dummy module) with the same MAC is created rather than renaming the RouterOS-managed interface
 - **Process names**: `acc-gw.router.<arch>` and `acc_upgrade_monitor` exceed the 15-character `comm`, so `pidof` cannot find them;
