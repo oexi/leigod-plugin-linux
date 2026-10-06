@@ -35,6 +35,17 @@ sysctl_up() {
     return 0
 }
 
+# 发给本机的包先查 local 表（OpenWrt 上 local 规则的优先级是 0）。RouterOS 容器里 local 规则在 200，
+# 插件 tun 模式的 fwmark 规则（199）排在它前面：被加速设备的 IP（例如被 App 当成 PC 的主路由）
+# 发给本机的 ICMP 等包会被送进 tun_<类别>，本机收不到
+local_rule_present() {
+    ip rule show pref 0 2>/dev/null | grep -q 'lookup local'
+}
+
+local_rule_up() {
+    local_rule_present || ip rule add pref 0 lookup local
+}
+
 chain_reset() {
     $IPT -t "$1" -N "$2" 2>/dev/null || $IPT -t "$1" -F "$2"
 }
@@ -90,6 +101,7 @@ rules_down() {
 }
 
 rules_present() {
+    local_rule_present || return 1
     $IPT -C INPUT -j LEIGOD_IN 2>/dev/null || return 1
     if [ "$GATEWAY" = "1" ]; then
         $IPT -C FORWARD -j LEIGOD_FWD 2>/dev/null || return 1
@@ -110,6 +122,7 @@ cmd_up() {
         i=$((i + 1))
     done
     [ "$GATEWAY" = "1" ] && sysctl_up
+    local_rule_up
     rules_up "$(lan_cidr)"
     mkdir -p "$LEIGOD_RUN_DIR"
     signature > "$STATE_FILE"
