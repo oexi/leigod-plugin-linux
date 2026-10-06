@@ -61,6 +61,8 @@ The entrypoint reproduces these files and runs the same two commands under its o
 - Rules are created only when acceleration starts: chain `GAMEACC` in `mangle`/`nat` `PREROUTING` and `filter` `INPUT`,
   ipsets `direct_*`, `target_*`, `proxy_*`, TPROXY to `10.20.30.40` with mark `0x99`. On stop the entrypoint removes them
   the same way the official `acc.init` does, before killing the processes
+- When acceleration starts for a device the plugin runs `conntrack -D --orig-src <device IP>`, so that connections opened
+  before it are re-created through the accelerator instead of keeping their old NAT state; the image ships `conntrack-tools` for this
 - A malformed request to the web API (e.g. a plain `POST /api`) makes `web` abort; `daemon` restarts it
 
 ## App discovery (UPnP)

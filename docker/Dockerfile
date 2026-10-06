@@ -22,7 +22,7 @@ RUN git clone https://git.openwrt.org/project/uci.git /src \
 FROM alpine:${ALPINE_VERSION}
 ARG TARGETARCH
 
-RUN apk add --no-cache busybox-extras curl dnsmasq ipset iproute2 iproute2-tc iptables iptables-legacy socat tini
+RUN apk add --no-cache busybox-extras conntrack-tools curl dnsmasq ipset iproute2 iproute2-tc iptables iptables-legacy socat tini
 
 COPY --from=uci /uci /sbin/uci
 COPY rootfs/ /
