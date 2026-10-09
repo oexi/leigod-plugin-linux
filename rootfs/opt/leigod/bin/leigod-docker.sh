@@ -268,6 +268,14 @@ run_plugin() {
 
 run_upgrade_monitor() {
     cd "$PLUGIN_DIR" || exit 1
+    # 插件自升级后，新版本的安装步骤自己拉起一个升级程序（父进程是 tini，不归本循环管）；
+    # 它运行时再启动的只会报 "already running" 并退出，所以等它退出后再接管
+    if [ -n "$(plugin_pids "-r upgrade")" ]; then
+        log "升级程序已在运行（插件自升级后拉起），等它退出后再接管"
+        while [ -n "$(plugin_pids "-r upgrade")" ]; do
+            sleep 60
+        done
+    fi
     exec "$PLUGIN_DIR/acc_upgrade_monitor" -r upgrade >/dev/null 2>&1
 }
 

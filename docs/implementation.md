@@ -55,6 +55,10 @@ The entrypoint reproduces these files and runs the same two commands under its o
   (e.g. `getRouterInfo`, `statistics`, `startAcc`), logged in `web_api.log` as `[api] request: ... response: ...`.
   In `tun` mode, starting acceleration creates `tun_<category>` interfaces and `fwmark 0x102`/`0x103` policy-routing rules;
   `acc_upgrade_monitor -r upgrade` checks for updates ("don't need to upgrade, local version: 1.2.2.52")
+- Self-upgrade (seen 1.2.2.52 → 1.2.2.64): the monitor downloads the package, starts the new binary to install it and exits 0;
+  the installer replaces the binary, kills `daemon` and starts a new `acc_upgrade_monitor` itself (reparented to tini).
+  A second monitor only logs "acc upgrade monitor already running, will exit", so the entrypoint waits for an existing
+  monitor to exit before starting its own
 - Logs: `/tmp/acc/log/acc_daemon.log`, `web_api.log`, `acc_upgrade.log`; state: `/tmp/acc/acc_core_conf.json`
 - Downloads a MAC vendor list for consoles (`mac.json`), a global config from `opapi.xxghh.biz`, and connects to
   `route-turn.xxghh.biz` (cloud relay for the app)
